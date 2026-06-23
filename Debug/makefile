@@ -1,6 +1,6 @@
 ################################################################################
 # Automatically-generated file. Do not edit!
-# Toolchain: GNU Tools for STM32 (14.3.rel1)
+# Toolchain: GNU Tools for STM32 (13.3.rel1)
 ################################################################################
 
 -include ../makefile.init
@@ -60,8 +60,8 @@ all: main-build
 main-build: SpaceSnap-flight-bootloader.elf secondary-outputs
 
 # Tool invocations
-SpaceSnap-flight-bootloader.elf SpaceSnap-flight-bootloader.map: $(OBJS) $(USER_OBJS) C:\Users\lucas\OneDrive\Documents\Work\STM32\SpaceSnap-flight-bootloader\STM32F217ZGTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "SpaceSnap-flight-bootloader.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m3 -T"C:\Users\lucas\OneDrive\Documents\Work\STM32\SpaceSnap-flight-bootloader\STM32F217ZGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="SpaceSnap-flight-bootloader.map" -Wl,--gc-sections -static --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+SpaceSnap-flight-bootloader.elf SpaceSnap-flight-bootloader.map: $(OBJS) $(USER_OBJS) C:\Users\Us\Documents\UNSAMSat\SpaceSnap-flight-bootloader\STM32F217ZGTX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "SpaceSnap-flight-bootloader.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m3 -T"C:\Users\Us\Documents\UNSAMSat\SpaceSnap-flight-bootloader\STM32F217ZGTX_FLASH.ld" --specs=nosys.specs -Wl,-Map="SpaceSnap-flight-bootloader.map" -Wl,--gc-sections -static --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

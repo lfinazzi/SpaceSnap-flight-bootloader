@@ -96,7 +96,7 @@ static const flash_sector_t flash_sectors[] = {
 
 /* ------------------------------------------------------------------------
  * Debug test that the bootloader works without checking CRC,
- * change for flight. TODO: Remove this after FRAM image load and tests.
+ * change for flight for release.
  * ---------------------------------------------------------------------- */
 #define FLIGHT_BUILD					0
 
@@ -176,20 +176,10 @@ static void MX_IWDG_Init(void);
 /* USER CODE BEGIN 0 */
 
 #if BOOTLOADER_DEBUG_LOG
-	uint32_t timestamp;
-	uint32_t total_seconds;
-	uint32_t seconds;
-	uint32_t minutes;
-	uint32_t hours;
-	char     timestamp_string[16];
-
 	/********************************************************************************
 	 * @brief  Transmits a timestamped message over the debug UART (huart4).
 	 *
-	 * @note   Prepends a "[HHHHH:MM:SS] " timestamp string computed from
-	 *         HAL_GetTick() before every message, where hours are zero-padded
-	 *         to 5 digits to support long-duration mission uptime. Transmission
-	 *         is blocking with LOG_UART_TIMEOUT ms timeout per call.
+	 * @note   Transmission is blocking with LOG_UART_TIMEOUT ms timeout per call.
 	 *         Uses strlen() to determine message length -- the input string must
 	 *         be null-terminated. Updates the global timestamp, total_seconds,
 	 *         hours, minutes, seconds, and timestamp_string variables as a side
@@ -199,15 +189,34 @@ static void MX_IWDG_Init(void);
 	 ********************************************************************************/
 	void Log(char *message)
 	{
-	    timestamp = HAL_GetTick();
-	    total_seconds = timestamp / 1000;
-	    seconds = total_seconds % 60;
-	    minutes = (total_seconds % 3600) / 60;
-	    hours = total_seconds / 3600;
-	    sprintf(timestamp_string, "[%05lu:%02lu:%02lu] ", hours, minutes, seconds);
-	    HAL_UART_Transmit(&huart4, (uint8_t *) timestamp_string, 15, LOG_UART_TIMEOUT);
 	    HAL_UART_Transmit(&huart4, (uint8_t *) message, strlen(message), LOG_UART_TIMEOUT);
 	    return;
+	}
+
+
+	/********************************************************************************
+	 * @brief  Logs a labeled 32-bit value in hexadecimal over the debug UART.
+	 *
+	 * @note   Prints prefix followed immediately by the value formatted as
+	 *         "0xXXXXXXXX\r\n". Avoids sprintf and the newlib printf chain
+	 *         entirely, saving ~3.3 KB of flash (sprintf, malloc, __udivmoddi4).
+	 *         Output is always 10 characters for the hex value plus CRLF.
+	 *
+	 * @param  prefix   Null-terminated label string printed before the value.
+	 * @param  val      32-bit value to print.
+	 *
+	 * @retval None
+	 ********************************************************************************/
+	void log_hex(char *prefix, uint32_t val)
+	{
+	    char buf[16];
+	    const char hex[] = "0123456789ABCDEF";
+	    buf[0]='0'; buf[1]='x';
+	    for (int i = 0; i < 8; i++)
+	        buf[2+i] = hex[(val >> (28 - i*4)) & 0xF];
+	    buf[10]='\r'; buf[11]='\n'; buf[12]='\0';
+	    LOG(prefix);
+	    LOG(buf);
 	}
 #endif 	/* BOOTLOADER_DEBUG_LOG */
 
@@ -300,11 +309,6 @@ HAL_StatusTypeDef Flash_ErasePages(uint32_t start_addr, uint32_t size)
         if (sec_start < end_addr && sec_end > start_addr) {
             FLASH_EraseInitTypeDef erase = {0};
             uint32_t sector_error = 0;
-            char logbuf[96];
-
-            sprintf(logbuf, "Erasing flash sector %lu (0x%08lX)\r\n",
-                    (unsigned long)i, (unsigned long)sec_start);
-            LOG(logbuf);
 
             erase.TypeErase   = FLASH_TYPEERASE_SECTORS;
 
@@ -353,16 +357,13 @@ HAL_StatusTypeDef RestoreAppFromFRAM(uint32_t app_size)
     uint32_t fram_offset = FIRMWARE_IMAGE_START;
     uint32_t flash_addr  = APP_ADDRESS;
     uint32_t remaining   = app_size;
-    char logbuf[64];
 
     if (app_size == 0 || app_size > FIRMWARE_IMAGE_SIZE) {
         LOG("Restore aborted: invalid app_size from FRAM\r\n");
         return HAL_ERROR;   /* sanity check - corrupt/garbage size field */
     }
 
-    sprintf(logbuf, "Restoring app: %lu bytes from FRAM 0x%08lX\r\n",
-            (unsigned long)app_size, (unsigned long)FIRMWARE_IMAGE_START);
-    LOG(logbuf);
+    LOG("Restoring app...\r\n");
 
     HAL_FLASH_Unlock();
 
@@ -393,8 +394,7 @@ HAL_StatusTypeDef RestoreAppFromFRAM(uint32_t app_size)
             memcpy(&word, &chunk[i], 4);
             status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, flash_addr + i, word);
             if (status != HAL_OK) {
-                sprintf(logbuf, "Flash program failed at 0x%08lX\r\n", (unsigned long)(flash_addr + i));
-                LOG(logbuf);
+                LOG("Flash program failed.\r\n");
                 HAL_FLASH_Lock();
                 return status;
             }
@@ -437,9 +437,11 @@ HAL_StatusTypeDef JumpToApplication(void)
     uint32_t appStack = *(__IO uint32_t*)(APP_ADDRESS);
     uint32_t appReset  = *(__IO uint32_t*)(APP_ADDRESS + 4);
 
+    log_hex("JumpToApp: ", appStack);
+
     /* Sanity check: initial SP must point somewhere inside SRAM.
      * Catches the common case of erased/unprogrammed flash (0xFFFFFFFF). */
-    if (appStack < APP_SRAM_BASE || appStack >= APP_SRAM_END) {
+    if (appStack < APP_SRAM_BASE || appStack > APP_SRAM_END) {
         LOG("Jump aborted: invalid app stack pointer\r\n");
         return HAL_ERROR;
     }
@@ -451,12 +453,6 @@ HAL_StatusTypeDef JumpToApplication(void)
         return HAL_ERROR;
     }
 
-#if BOOTLOADER_DEBUG_LOG
-    char logbuf[64];
-    sprintf(logbuf, "Jumping to app at 0x%08lX (SP=0x%08lX)\r\n",
-            (unsigned long)appReset, (unsigned long)appStack);
-    LOG(logbuf);
-#endif
 
     /* Reset peripherals the bootloader configured (FRAM SPI, any clocks,
 	 * GPIO, etc.) back to their power-on state so the app starts from a
@@ -515,16 +511,14 @@ void Bootloader_Run(void)
     uint32_t stored_crc = 0;
     uint32_t app_size    = 0;
     uint32_t calculated_crc;
-    char logbuf[80];
 
     LOG("FLIGHT Bootloader started\r\n");
 
     FRAM_Read(FIRMWARE_BACKUP_START, (uint8_t*)&app_size, sizeof(app_size));
     FRAM_Read(FIRMWARE_BACKUP_START + sizeof(app_size), (uint8_t*)&stored_crc, sizeof(stored_crc));
 
-    sprintf(logbuf, "FRAM: stored_crc=0x%08lX app_size=%lu\r\n",
-            (unsigned long)stored_crc, (unsigned long)app_size);
-    LOG(logbuf);
+    log_hex("FRAM: stored_crc= ", stored_crc);
+    log_hex("FRAM: stored_size= ", app_size);
 
     /* Sanity check app_size before using it as a CRC/read length -
      * FRAM could be blank or corrupted (e.g. first boot), in which case
@@ -534,8 +528,7 @@ void Bootloader_Run(void)
     } else {
         calculated_crc = CRC32_Calculate((uint8_t*)APP_ADDRESS, app_size);
 
-        sprintf(logbuf, "Calculated CRC of flash image: 0x%08lX\r\n", (unsigned long)calculated_crc);
-        LOG(logbuf);
+        log_hex("Calculated CRC of flash image: ", calculated_crc);
 
         if (calculated_crc == stored_crc) {
             LOG("CRC match - app image OK\r\n");
@@ -581,7 +574,15 @@ void Bootloader_Run(void)
  ********************************************************************************/
 void Bootloader_Run_Debug(void)
 {
+	uint32_t stored_crc = 0;
+	uint32_t app_size    = 0;
     LOG("Debug Bootloader started\r\n");
+
+    FRAM_Read(FIRMWARE_BACKUP_START, (uint8_t*)&app_size, sizeof(app_size));
+    FRAM_Read(FIRMWARE_BACKUP_START + sizeof(app_size), (uint8_t*)&stored_crc, sizeof(stored_crc));
+
+    log_hex("FRAM: stored_crc= ", stored_crc);
+    log_hex("FRAM: stored_size= ", app_size);
 
     // Always jumps to app. Function is used to check jump is implemented ok
     JumpToApplication();
@@ -764,7 +765,7 @@ static void MX_UART4_Init(void)
 
   /* USER CODE END UART4_Init 1 */
   huart4.Instance = UART4;
-  huart4.Init.BaudRate = 115200;
+  huart4.Init.BaudRate = 460800;
   huart4.Init.WordLength = UART_WORDLENGTH_8B;
   huart4.Init.StopBits = UART_STOPBITS_1;
   huart4.Init.Parity = UART_PARITY_NONE;
