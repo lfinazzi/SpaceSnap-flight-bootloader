@@ -119,9 +119,10 @@ static const flash_sector_t flash_sectors[] = {
 
 #define FRAM_ADDR_APP_SIZE             (FIRMWARE_BACKUP_START)            /* uint32_t, 4 bytes */
 #define FRAM_ADDR_APP_CRC              ((FIRMWARE_BACKUP_START) + (4U))   /* uint32_t, 4 bytes */
+#define FRAM_ADDR_APP_VERSION          ((FIRMWARE_BACKUP_START) + (8U))   /* uint32_t, 4 bytes */
 
-#define FIRMWARE_IMAGE_START           ((FIRMWARE_BACKUP_START) + (8U))
-#define FIRMWARE_IMAGE_SIZE			   ((FIRMWARE_BACKUP_SIZE) - (8U))
+#define FIRMWARE_IMAGE_START           ((FIRMWARE_BACKUP_START) + (12U))
+#define FIRMWARE_IMAGE_SIZE			   ((FIRMWARE_BACKUP_SIZE) - (12U))
 
 // Number of flash sectors in chip
 #define NUM_FLASH_SECTORS (sizeof(flash_sectors) / sizeof(flash_sectors[0]))
@@ -508,17 +509,20 @@ HAL_StatusTypeDef JumpToApplication(void)
  ********************************************************************************/
 void Bootloader_Run(void)
 {
-    uint32_t stored_crc = 0;
+    uint32_t stored_crc  = 0;
     uint32_t app_size    = 0;
+    uint32_t app_version = 0;
     uint32_t calculated_crc;
 
     LOG("FLIGHT Bootloader started\r\n");
 
-    FRAM_Read(FIRMWARE_BACKUP_START, (uint8_t*)&app_size, sizeof(app_size));
-    FRAM_Read(FIRMWARE_BACKUP_START + sizeof(app_size), (uint8_t*)&stored_crc, sizeof(stored_crc));
+    FRAM_Read(FRAM_ADDR_APP_SIZE, (uint8_t*)&app_size, sizeof(app_size));
+    FRAM_Read(FRAM_ADDR_APP_CRC, (uint8_t*)&stored_crc, sizeof(stored_crc));
+    FRAM_Read(FRAM_ADDR_APP_VERSION, (uint8_t*)&app_version, sizeof(app_version));
 
     log_hex("FRAM: stored_crc= ", stored_crc);
     log_hex("FRAM: stored_size= ", app_size);
+    log_hex("FRAM: stored_version= ", app_version);
 
     /* Sanity check app_size before using it as a CRC/read length -
      * FRAM could be blank or corrupted (e.g. first boot), in which case
@@ -574,15 +578,18 @@ void Bootloader_Run(void)
  ********************************************************************************/
 void Bootloader_Run_Debug(void)
 {
-	uint32_t stored_crc = 0;
+	uint32_t stored_crc  = 0;
 	uint32_t app_size    = 0;
+	uint32_t app_version = 0;
     LOG("Debug Bootloader started\r\n");
 
-    FRAM_Read(FIRMWARE_BACKUP_START, (uint8_t*)&app_size, sizeof(app_size));
-    FRAM_Read(FIRMWARE_BACKUP_START + sizeof(app_size), (uint8_t*)&stored_crc, sizeof(stored_crc));
+    FRAM_Read(FRAM_ADDR_APP_SIZE, (uint8_t*)&app_size, sizeof(app_size));
+	FRAM_Read(FRAM_ADDR_APP_CRC, (uint8_t*)&stored_crc, sizeof(stored_crc));
+	FRAM_Read(FRAM_ADDR_APP_VERSION, (uint8_t*)&app_version, sizeof(app_version));
 
-    log_hex("FRAM: stored_crc= ", stored_crc);
-    log_hex("FRAM: stored_size= ", app_size);
+	log_hex("FRAM: stored_crc= ", stored_crc);
+	log_hex("FRAM: stored_size= ", app_size);
+	log_hex("FRAM: stored_version= ", app_version);
 
     // Always jumps to app. Function is used to check jump is implemented ok
     JumpToApplication();
