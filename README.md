@@ -22,7 +22,7 @@ Bootloader for the **UNSAM SpaceSnap** imaging payload — runs on every reset o
 ## Features
 
 - **CRC32 image validation** — computes a zlib-compatible CRC32 over the application region in flash and compares it against a checksum maintained in FRAM before ever jumping to it.
-- **FRAM-backed recovery** — on a CRC mismatch, erases and reprograms the application region in flash from a backup image stored in FRAM, then re-validates before retrying the jump.
+- **FRAM-backed recovery** — on a CRC mismatch, erases and reprograms the application region in flash from a backup image stored in FRAM, then re-validates before retrying the jump. Currently, two copies of the firmware backup are stored in FRAM (each upto 128 kB).
 - **Vector-table sanity checks** — before jumping, confirms the application's initial stack pointer falls inside valid SRAM and its reset handler address has the Thumb bit set, catching blank/erased flash without relying on a successful CRC check alone.
 - **Watchdog-aware flash operations** — `HAL_IWDG_Refresh()` is called between sector erases and between program chunks so multi-second flash erase operations don't trip the IWDG mid-restore.
 - **Fail-safe halt** — if neither the existing flash image nor the FRAM-restored image validates, the bootloader halts in `Error_Handler()` rather than jumping into unknown code.
@@ -74,15 +74,23 @@ Bootloader/
 | 4 | 64 KB | `0x08010000`–`0x0801FFFF` | Application |
 | 5–11 | 128 KB each | `0x08020000`–`0x080FFFFF` | Application (only as many as `app_size` requires) |
 
-The application region can span up to ~256 KB (Sectors 1 through part of 6), matching `FIRMWARE_BACKUP_SIZE` below.
+The application region can span up to ~256 KB (Sectors 1 through part of 6), matching `FIRMWARE_BACKUP_SIZE` below. Each FW copy can be upto 128 kB.
 
 ### FRAM Backup Region (offset `0x1C0000`, within the shared 2 MB FRAM)
 
 | Offset (from `0x1C0000`) | Size | Content |
 |---------------------------|------|---------|
-| `+0x00` | 4 B | `app_size` (uint32, LE) |
-| `+0x04` | 4 B | `stored_crc` — CRC32 of the application image |
-| `+0x08` | up to 256 KB − 8 B | Application image backup |
+| `+0x00` | 4 B | `app_size` Backup A (uint32, LE) |
+| `+0x04` | 4 B | `stored_crc` — CRC32 of the application image A |
+| `+0x08` | 4 B | `stored_version` — version of the application image A |
+| `+0x0C` | up to (128 KB - 12 Bytes) | Application A image backup |
+
+| Offset (from `0x1E0000`) | Size | Content |
+|---------------------------|------|---------|
+| `+0x00` | 4 B | `app_size` Backup B (uint32, LE) |
+| `+0x04` | 4 B | `stored_crc` — CRC32 of the application image B |
+| `+0x08` | 4 B | `stored_version` — version of the application image B |
+| `+0x0C` | (up to 128 KB - 12 Bytes) | Application B image backup |
 
 This region and offset are shared by contract with the application firmware's own FRAM map, where the same 256 KB window is reserved at the same address. Any change to `FIRMWARE_BACKUP_SIZE` or `END_OF_FRAM` here must be mirrored on the application side, or the two firmwares will silently disagree about where the backup image lives.
 
@@ -92,14 +100,14 @@ This region and offset are shared by contract with the application firmware's ow
 
 `Bootloader_Run()`, called once from `main()` after HAL/SPI init, follows this sequence:
 
-1. Read `app_size` and `stored_crc` from the FRAM backup header.
+1. Read `app_size` and `stored_crc` from both FRAM backups.
 2. Sanity-check `app_size` against the FRAM backup capacity before using it as a length for anything.
-3. Compute the CRC32 of the current flash image at `APP_ADDRESS` and compare against `stored_crc`.
-4. On match, attempt `JumpToApplication()`.
-5. On mismatch (or an invalid `app_size`, or a jump that fails its own vector-table sanity checks), call `RestoreAppFromFRAM()` to erase and reprogram the application region from the FRAM backup, then repeat the CRC check and jump attempt once.
-6. If no valid, jumpable image can be obtained by this point, call `Error_Handler()`, which disables interrupts and halts.
+3. Compute the CRC32 of the current flash image at `APP_ADDRESS` and compare against `crc_a`.
+4. On match, attempt `JumpToApplication()` (Flash healthy).
+5. On mismatch, call `RestoreAppFromFRAM()` to erase and reprogram the application region from the FRAM backup A, then compare flash CRC with FRAM CRC.If match, jump to application. If mismatch, try the same with backup B. 
+6. If no valid image (flash + 2 backups corrupted), call `Error_Handler()`, which disables interrupts and halts. No recovery beyond this point.
 
-The FRAM backup header is treated as read-only by this firmware — it is written externally (e.g. a ground-side flashing tool) before deployment and is not modified by the bootloader itself.
+The FRAM backup headers are treated as read-only by this firmware — it is written externally (e.g. a ground-side flashing tool) before deployment and is not modified by the bootloader itself.
 
 ---
 
@@ -125,5 +133,3 @@ The `Bootloader.ioc` file can be opened in **STM32CubeMX** to regenerate HAL dri
 ## Known Limitations / Pending Work
 
 - **FRAM read error handling** — `FRAM_Read` does not check the return status of `HAL_SPI_Transmit`/`HAL_SPI_Receive`; a SPI bus fault is not currently distinguishable from valid-but-wrong data and relies on the downstream CRC check to catch it.
-- **Single backup slot** — only one firmware backup image is retained in FRAM; a corrupted backup itself cannot be recovered from on-device.
-- **No on-device backup write path** — the FRAM header (`app_size` + CRC32) and image are expected to be written externally before launch; this firmware only ever reads that region.

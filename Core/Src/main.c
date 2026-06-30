@@ -98,9 +98,9 @@ static const flash_sector_t flash_sectors[] = {
  * Debug test that the bootloader works without checking CRC,
  * change for flight for release.
  * ---------------------------------------------------------------------- */
-#define FLIGHT_BUILD					0
+#define FLIGHT_BUILD
 
-#if FLIGHT_BUILD
+#ifdef FLIGHT_BUILD
 	#define BOOT_RUN()					Bootloader_Run()
 #else
 	#define BOOT_RUN()					Bootloader_Run_Debug()
@@ -111,18 +111,28 @@ static const flash_sector_t flash_sectors[] = {
  * ---------------------------------------------------------------------- */
 #define APP_ADDRESS                    (0x08004000UL)
 
-#define FIRMWARE_BACKUP_SIZE           (0x40000UL)    /* 256 kB for FW backup image */
-#define END_OF_FRAM                    (0x200000UL)   /* 2 MB */
+#define FIRMWARE_BACKUP_SIZE           (0x40000UL)    				/* 256 kB for FW backup image */
+#define FIRMWARE_COPY_SIZE             (FIRMWARE_BACKUP_SIZE / 2)   /* 128 KB per copy */
+#define END_OF_FRAM                    (0x200000UL)   				/* 2 MB */
 
 // structure: app size (4B), app CRC32 (4B), firmware image (rest of backup size)
 #define FIRMWARE_BACKUP_START          ((END_OF_FRAM) - (FIRMWARE_BACKUP_SIZE))
 
-#define FRAM_ADDR_APP_SIZE             (FIRMWARE_BACKUP_START)            /* uint32_t, 4 bytes */
-#define FRAM_ADDR_APP_CRC              ((FIRMWARE_BACKUP_START) + (4U))   /* uint32_t, 4 bytes */
-#define FRAM_ADDR_APP_VERSION          ((FIRMWARE_BACKUP_START) + (8U))   /* uint32_t, 4 bytes */
+#define FIRMWARE_BACKUP_A_START      	(FIRMWARE_BACKUP_START)
+#define FIRMWARE_IMAGE_A_START       	((FIRMWARE_BACKUP_A_START) + (12U))
+#define FIRMWARE_IMAGE_A_SIZE        	((FIRMWARE_COPY_SIZE) - (12U))
 
-#define FIRMWARE_IMAGE_START           ((FIRMWARE_BACKUP_START) + (12U))
-#define FIRMWARE_IMAGE_SIZE			   ((FIRMWARE_BACKUP_SIZE) - (12U))
+#define FRAM_ADDR_APP_A_SIZE            (FIRMWARE_BACKUP_A_START)          	 /* uint32_t, 4 bytes */
+#define FRAM_ADDR_APP_A_CRC             ((FIRMWARE_BACKUP_A_START) + (4U))   /* uint32_t, 4 bytes */
+#define FRAM_ADDR_APP_A_VERSION         ((FIRMWARE_BACKUP_A_START) + (8U))   /* uint32_t, 4 bytes */
+
+#define FIRMWARE_BACKUP_B_START      	(FIRMWARE_BACKUP_A_START + FIRMWARE_COPY_SIZE)
+#define FIRMWARE_IMAGE_B_START       	((FIRMWARE_BACKUP_B_START) + (12U))
+#define FIRMWARE_IMAGE_B_SIZE        	((FIRMWARE_COPY_SIZE) - (12U))
+
+#define FRAM_ADDR_APP_B_SIZE            (FIRMWARE_BACKUP_B_START)          	 /* uint32_t, 4 bytes */
+#define FRAM_ADDR_APP_B_CRC             ((FIRMWARE_BACKUP_B_START) + (4U))   /* uint32_t, 4 bytes */
+#define FRAM_ADDR_APP_B_VERSION         ((FIRMWARE_BACKUP_B_START) + (8U))   /* uint32_t, 4 bytes */
 
 // Number of flash sectors in chip
 #define NUM_FLASH_SECTORS (sizeof(flash_sectors) / sizeof(flash_sectors[0]))
@@ -331,40 +341,37 @@ HAL_StatusTypeDef Flash_ErasePages(uint32_t start_addr, uint32_t size)
 
 
 /********************************************************************************
- * @brief  Restores the application image from FRAM backup into internal
- *         flash and re-arms it for boot.
+ * @brief  Restores the application image from a specified FRAM backup
+ *         copy into internal flash and re-arms it for boot.
  *
- * @note   Validates app_size against the FRAM backup region, erases the
+ * @note   Validates app_size against the copy's image size, erases the
  *         flash sectors covering [APP_ADDRESS, APP_ADDRESS + app_size),
- *         then streams the image from FRAM in FLASH_PROGRAM_CHUNK_SIZE
- *         chunks, programming each chunk to flash one word at a time.
- *         The final partial chunk is padded to a 4-byte boundary with
- *         0xFF before programming. Flash is unlocked for the duration
- *         of the operation and locked again before every return path
- *         (success or failure).
+ *         then streams the image from the given FRAM source in
+ *         FLASH_PROGRAM_CHUNK_SIZE chunks, programming each chunk to
+ *         flash one word at a time. IWDG refreshed throughout.
  *
- * @param  app_size   Size in bytes of the application image to restore,
- *                     as read from the FRAM backup header.
+ * @param  app_size       Size in bytes of the application image to restore.
+ * @param  image_start    FRAM source address for the image data
+ *                         (FIRMWARE_IMAGE_A_START or FIRMWARE_IMAGE_B_START).
  *
  * @retval HAL_StatusTypeDef   HAL_OK on success. HAL_ERROR if app_size is
- *                             zero or exceeds the FRAM backup capacity.
- *                             Otherwise the HAL error from the failing
- *                             erase or program operation.
+ *                             invalid. Otherwise the HAL error from the
+ *                             failing erase or program operation.
  ********************************************************************************/
-HAL_StatusTypeDef RestoreAppFromFRAM(uint32_t app_size)
+static HAL_StatusTypeDef RestoreAppFromFRAM(uint32_t app_size, uint32_t image_start)
 {
     HAL_StatusTypeDef status;
     uint8_t chunk[FLASH_PROGRAM_CHUNK_SIZE];
-    uint32_t fram_offset = FIRMWARE_IMAGE_START;
+    uint32_t fram_offset = image_start;
     uint32_t flash_addr  = APP_ADDRESS;
     uint32_t remaining   = app_size;
 
-    if (app_size == 0 || app_size > FIRMWARE_IMAGE_SIZE) {
-        LOG("Restore aborted: invalid app_size from FRAM\r\n");
-        return HAL_ERROR;   /* sanity check - corrupt/garbage size field */
+    if (app_size == 0 || app_size > FIRMWARE_IMAGE_A_SIZE) {
+        LOG("Restore aborted: invalid app_size\r\n");
+        return HAL_ERROR;
     }
 
-    LOG("Restoring app...\r\n");
+    log_hex("Restoring app from FRAM offset=", image_start);
 
     HAL_FLASH_Unlock();
 
@@ -382,9 +389,6 @@ HAL_StatusTypeDef RestoreAppFromFRAM(uint32_t app_size)
 
         FRAM_Read(fram_offset, chunk, n);
 
-        /* Pad final partial chunk to a 4-byte boundary with 0xFF
-         * (erased-flash value) so the word program below never reads
-         * past the buffer. */
         uint32_t n_words = (n + 3) / 4;
         if (n % 4 != 0) {
             memset(&chunk[n], 0xFF, (n_words * 4) - n);
@@ -395,7 +399,7 @@ HAL_StatusTypeDef RestoreAppFromFRAM(uint32_t app_size)
             memcpy(&word, &chunk[i], 4);
             status = HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, flash_addr + i, word);
             if (status != HAL_OK) {
-                LOG("Flash program failed.\r\n");
+                log_hex("Flash program failed at ", flash_addr + i);
                 HAL_FLASH_Lock();
                 return status;
             }
@@ -404,7 +408,7 @@ HAL_StatusTypeDef RestoreAppFromFRAM(uint32_t app_size)
         fram_offset += n;
         flash_addr   += n;
         remaining     -= n;
-        HAL_IWDG_Refresh(&hiwdg);   /* service watchdog between chunks */
+        HAL_IWDG_Refresh(&hiwdg);
     }
 
     HAL_FLASH_Lock();
@@ -509,62 +513,81 @@ HAL_StatusTypeDef JumpToApplication(void)
  ********************************************************************************/
 void Bootloader_Run(void)
 {
-    uint32_t stored_crc  = 0;
-    uint32_t app_size    = 0;
-    uint32_t app_version = 0;
+    uint32_t size_a; uint32_t size_b;
+    uint32_t crc_a; uint32_t crc_b;
+
     uint32_t calculated_crc;
+    uint8_t  a_valid = 0, b_valid = 0;
 
     LOG("FLIGHT Bootloader started\r\n");
 
-    FRAM_Read(FRAM_ADDR_APP_SIZE, (uint8_t*)&app_size, sizeof(app_size));
-    FRAM_Read(FRAM_ADDR_APP_CRC, (uint8_t*)&stored_crc, sizeof(stored_crc));
-    FRAM_Read(FRAM_ADDR_APP_VERSION, (uint8_t*)&app_version, sizeof(app_version));
+    FRAM_Read(FRAM_ADDR_APP_A_SIZE, (uint8_t*)&size_a, sizeof(uint32_t));
+    FRAM_Read(FRAM_ADDR_APP_A_CRC, (uint8_t*)&crc_a, sizeof(uint32_t));
+    FRAM_Read(FRAM_ADDR_APP_B_SIZE, (uint8_t*)&size_b, sizeof(uint32_t));
+    FRAM_Read(FRAM_ADDR_APP_B_CRC, (uint8_t*)&crc_b, sizeof(uint32_t));
 
-    log_hex("FRAM: stored_crc= ", stored_crc);
-    log_hex("FRAM: stored_size= ", app_size);
-    log_hex("FRAM: stored_version= ", app_version);
+    log_hex("Copy A: crc=", crc_a);
+    log_hex("Copy A: size=", size_a);
+    log_hex("Copy B: crc=", crc_b);
+    log_hex("Copy B: size=", size_b);
 
-    /* Sanity check app_size before using it as a CRC/read length -
-     * FRAM could be blank or corrupted (e.g. first boot), in which case
-     * app_size may be garbage or absurdly large. */
-    if (app_size == 0 || app_size > FIRMWARE_IMAGE_SIZE) {
-        LOG("Invalid app_size from FRAM - skipping flash CRC check\r\n");
-    } else {
-        calculated_crc = CRC32_Calculate((uint8_t*)APP_ADDRESS, app_size);
-
-        log_hex("Calculated CRC of flash image: ", calculated_crc);
-
-        if (calculated_crc == stored_crc) {
-            LOG("CRC match - app image OK\r\n");
+    /* --- Try current flash image first, validated against copy A's CRC --- */
+    if (size_a != 0 && size_a <= FIRMWARE_IMAGE_A_SIZE) {
+        calculated_crc = CRC32_Calculate((uint8_t*)APP_ADDRESS, size_a);
+        if (calculated_crc == crc_a) {
+            LOG("Flash image matches copy A - booting\r\n");
             JumpToApplication();
-
-            // If it doesn't jump, there was an error
-            LOG("Jump failed despite CRC match - vector table invalid\r\n");
-        }
-        else {
-            LOG("CRC mismatch - flash image corrupted, restoring from FRAM\r\n");
+            LOG("Jump failed despite CRC match\r\n");
         }
     }
 
-    /* Flash image was missing, invalid-sized, CRC-mismatched, or failed
-     * its own jump sanity check - attempt restore from FRAM backup. */
-    if (app_size != 0 && app_size <= FIRMWARE_IMAGE_SIZE) {
-        if (RestoreAppFromFRAM(app_size) == HAL_OK) {
-            calculated_crc = CRC32_Calculate((uint8_t*)APP_ADDRESS, app_size);
-            if (calculated_crc == stored_crc) {
-                LOG("Restored image CRC OK\r\n");
-                JumpToApplication();
-
-                // If it doesn't jump, there was an error
-                LOG("Jump failed after restore - vector table invalid\r\n");
+    /* --- Flash invalid or jump failed - try restoring from copy A --- */
+    if (size_a != 0 && size_a <= FIRMWARE_IMAGE_A_SIZE) {
+        if (RestoreAppFromFRAM(size_a, FIRMWARE_IMAGE_A_START) == HAL_OK) {
+            calculated_crc = CRC32_Calculate((uint8_t*)APP_ADDRESS, size_a);
+            if (calculated_crc == crc_a) {
+                LOG("Restored from copy A - CRC OK\r\n");
+                a_valid = 1;
             } else {
-                LOG("Restored image CRC still mismatched\r\n");
+                LOG("Copy A restore CRC mismatch\r\n");
             }
         }
     }
+    else {
+        LOG("Copy A header invalid\r\n");
+    }
 
-    /* Flash image bad, restore attempt bad, or jump itself failed its
-     * sanity checks - do not jump. */
+    if (a_valid) {
+        /* Copy A is good. */
+        JumpToApplication();
+        LOG("Jump failed after restore from copy A\r\n");
+    }
+
+    /* --- Copy A unusable - try copy B --- */
+    LOG("Falling back to copy B\r\n");
+
+    if (size_b != 0 && size_b <= FIRMWARE_IMAGE_B_SIZE) {
+        if (RestoreAppFromFRAM(size_b, FIRMWARE_IMAGE_B_START) == HAL_OK) {
+            calculated_crc = CRC32_Calculate((uint8_t*)APP_ADDRESS, size_b);
+            if (calculated_crc == crc_b) {
+                LOG("Restored from copy B - CRC OK\r\n");
+                b_valid = 1;
+            } else {
+                LOG("Copy B restore CRC mismatch\r\n");
+            }
+        }
+    } else {
+        LOG("Copy B header invalid\r\n");
+    }
+
+    if (b_valid) {
+        /* Copy B is good, copy A is confirmed bad */
+        JumpToApplication();
+        LOG("Jump failed after restore from copy B\r\n");
+    }
+
+    /* --- Both copies unusable --- */
+    LOG("Both firmware backup copies failed - halting\r\n");
     Error_Handler();
 }
 
@@ -583,9 +606,9 @@ void Bootloader_Run_Debug(void)
 	uint32_t app_version = 0;
     LOG("Debug Bootloader started\r\n");
 
-    FRAM_Read(FRAM_ADDR_APP_SIZE, (uint8_t*)&app_size, sizeof(app_size));
-	FRAM_Read(FRAM_ADDR_APP_CRC, (uint8_t*)&stored_crc, sizeof(stored_crc));
-	FRAM_Read(FRAM_ADDR_APP_VERSION, (uint8_t*)&app_version, sizeof(app_version));
+    FRAM_Read(FRAM_ADDR_APP_A_SIZE, (uint8_t*)&app_size, sizeof(app_size));
+	FRAM_Read(FRAM_ADDR_APP_A_CRC, (uint8_t*)&stored_crc, sizeof(stored_crc));
+	FRAM_Read(FRAM_ADDR_APP_A_VERSION, (uint8_t*)&app_version, sizeof(app_version));
 
 	log_hex("FRAM: stored_crc= ", stored_crc);
 	log_hex("FRAM: stored_size= ", app_size);
