@@ -3,6 +3,7 @@
   ******************************************************************************
   * @file           : main.c
   * @brief          : Main program body
+  * @author			: Lucas Finazzi <lfinazzi@unsam.edu.ar>
   ******************************************************************************
   * @attention
   *
@@ -488,28 +489,35 @@ HAL_StatusTypeDef JumpToApplication(void)
 
 
 /********************************************************************************
- * @brief  Top-level boot decision logic: validates the application image
- *         in flash and either boots it, restores it from FRAM backup,
- *         or halts.
+ * @brief  Top-level boot decision logic: validates the flash image, falls
+ *         back through two independent FRAM backup copies if needed, and
+ *         either boots a valid image or halts.
  *
- * @note   Reads app_size and stored_crc from the FRAM backup header and
- *         sanity-checks app_size before using it. Computes the CRC32 of
- *         the current flash image and compares against stored_crc. On
- *         match, attempts to jump to the application. On mismatch (or
- *         if the jump itself fails its own sanity checks), assumes the
- *         flash image is corrupted and attempts to restore it from the
- *         FRAM backup via RestoreAppFromFRAM(), then re-validates the
- *         CRC and attempts the jump again. If no valid, jumpable image
- *         can be obtained, calls Error_Handler() and does not return.
- *         Must be called from main() after HAL and SPI (FRAM)
- *         peripheral init.
+ * @note   Reads both backup headers (copy A at FIRMWARE_BACKUP_A_START,
+ *         copy B at FIRMWARE_BACKUP_B_START) from FRAM and proceeds
+ *         through the following priority chain:
+ *
+ *         1. Compute CRC32 of the current flash image against copy A's
+ *            stored CRC. If it matches, jump immediately (fast path —
+ *            no FRAM restore needed on a clean boot).
+ *         2. If the flash CRC fails (or the jump itself fails its SP/
+ *            Thumb-bit sanity checks), attempt to restore from copy A.
+ *            Re-validate the CRC after restore. If both pass, jump.
+ *         3. If copy A is unusable (invalid header, failed restore, or
+ *            post-restore CRC mismatch), attempt to restore from copy B
+ *            using the same validate-restore-validate sequence.
+ *         4. If copy B also fails, call Error_Handler() and halt.
+ *
+ *         Two independent FRAM copy failures are therefore required to
+ *         render the payload unbootable. IWDG is refreshed throughout
+ *         all long operations (flash erase, flash program). Must be
+ *         called after HAL, SPI, and IWDG peripheral initialisation.
  *
  * @param  None
  *
- * @retval None   Does not return if a valid image is successfully
- *                jumped to. Otherwise falls through to Error_Handler(),
- *                which is expected to not return either (e.g. infinite
- *                loop or reset).
+ * @retval None   Does not return if a valid image is successfully jumped
+ *                to. Falls through to Error_Handler() otherwise, which
+ *                halts in an infinite loop with interrupts disabled.
  ********************************************************************************/
 void Bootloader_Run(void)
 {
@@ -593,11 +601,23 @@ void Bootloader_Run(void)
 
 
 /********************************************************************************
- * @brief  Top-level bootloader. Always goes to application. Used for debug!
+ * @brief  Debug-only bootloader entry point: reads copy A header from
+ *         FRAM for logging, then unconditionally jumps to the application
+ *         without any CRC validation or restore logic.
+ *
+ * @note   Used during application development to verify the jump
+ *         mechanism itself works correctly, independently of FRAM state.
+ *         Selected by leaving FLIGHT_BUILD undefined — the BOOT_RUN()
+ *         macro resolves to this function instead of Bootloader_Run().
+ *         Never use in a flight build; it will boot any image in flash
+ *         regardless of whether it is valid or matches any backup copy.
  *
  * @param  None
  *
- * @retval None
+ * @retval None   Does not return on a successful jump. If JumpToApplication()
+ *                returns (invalid vector table), execution falls through
+ *                into the infinite while(1) loop in main() with no error
+ *                recovery.
  ********************************************************************************/
 void Bootloader_Run_Debug(void)
 {
